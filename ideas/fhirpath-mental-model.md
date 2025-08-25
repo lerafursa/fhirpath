@@ -3,141 +3,19 @@
 ## Introduction
 
 FHIRPath is a path-based navigation and extraction language designed for FHIR resources. 
-At first glance, expressions like `Patient.name.where(use = 'official').given` might seem like simple property access, 
-but understanding how FHIRPath works may be quite tricky without proper mental model.
-Here are few latest discussions on FHIR zulip chat demonstrating the hidden complexity of the language:
+At first glance, expressions like `Patient.name.where(use = 'official').given` might seem like simple property access. 
+But understanding how FHIRPath really works may be quite tricky without proper mental model.
+This is clear from ongoing community discussions, where even experienced users debate how certain expressions should behave:
 * [What should it do](https://chat.fhir.org/#narrow/channel/179266-fhirpath/topic/what.20should.20it.20do.3F/with/529563311) 
 * [Can we chain iif from left side](https://chat.fhir.org/#narrow/channel/179266-fhirpath/topic/Can.20we.20chain.20iif.20from.20left.20side.3F/with/529625685)
 
-This guide will help you build an accurate mental model of how FHIRPath works by introducing "stream processing" model and walk 
+To cut through this complexity, this guide will help you build an accurate mental model of how FHIRPath works by introducing "stream processing" model and walk 
 through the language by examples.
 
 
-## The Core Mental Model: Everything is a Processing Node
-
-We can represent FHIRPath expression as a tree of nodes.
-The key insight that makes FHIRPath intuitive is this: 
-**every part of a FHIRPath expression is a processing node with the same interface**.
-
-```javascript
-node(context, input, args) -> { output, context }
-```
-
-Context is a set of variables and services, which are available to the nodes.
-Some nodes may set variables in context, which will be available to the next nodes.
-Context may flow from node to node by `.` operator.
-
-
-### The Universal Node Interface
-
-```
-                 arguments (other nodes)
-                        │
-                        ▼
-                 ┌─────────────────┐
-input         ──►│                 │──► output
-(collection)     │   Processing    │    (collection)
-                 │      Node       │
-context       ──►│                 │──► context
-(variables)      └─────────────────┘    (possibly modified)
-```
-
-Every node:
-- **Receives** a collection as input (even single values are collections of one)
-- **Receives** a context containing variables and environment
-- **Has arguments** which are themselves nodes
-- **Orchestrates** how and when its argument nodes are evaluated
-- **Processes** the results according to its logic
-- **Produces** a collection as output
-- **Produces** a context (usually unchanged, but some nodes modify it)
-
-### Node Evaluation Control
-
-A critical insight: **nodes control their arguments' evaluation**:
-
-1. **Simple nodes** (literals, identifiers): No arguments to control
-2. **Operator nodes**: Evaluate all arguments with same input/context
-3. **Function nodes**: Can control:
-   - **Whether** to evaluate arguments (iif only evaluates one branch)
-   - **How many times** to evaluate (where evaluates once per item)
-   - **With what context** (where adds $this, select adds $this)
-   - **In what order** (most evaluate left-to-right)
-
-### How Nodes Connect
-
-FHIRPath expressions are trees of connected nodes. **Data** (input) and **context** flow through these nodes:
-
-```
-Expression: Patient.name.given
-
-Tree structure:
-                    ┌─────┐
-                    │  .  │ (dot node - root)
-                    └──┬──┘
-                       │
-                ┌──────┴──────────┐
-                │                 │
-            ┌───┴──┐          ┌───┴───┐
-            │  .   │          │ given │
-            └───┬──┘          └───────┘
-                │
-        ┌───────┴────────┐
-        │                │
-    ┌───┴────┐      ┌───┴──┐
-    │Patient │      │ name │
-    └────────┘      └──────┘
-
-Evaluation flow:
-1. Patient (identifier) - extracts Patient from input
-2. . (dot) - pipes Patient's output to name
-3. name (identifier) - extracts name field(s)
-4. . (dot) - pipes name's output to given
-5. given (identifier) - extracts given field(s)
-```
-
-### Context Propagation Patterns
-
-Understanding how context flows is crucial:
-
-1. **Pass-through nodes** (most common): Input context = output context
-   - Simple navigation: `name`, `given`
-   - Simple functions: `first()`, `count()`
-   - Operators: `+`, `=`, `and`
-
-2. **Temporary context nodes**: Add variables during processing, then restore
-   - `where()`: adds `$this` for each item
-   - `select()`: adds `$this` for each item
-   - Context is restored after processing
-
-3. **Context-modifying nodes**: Permanently change context
-   - `defineVariable()`: adds a new variable
-   - Modified context flows to all subsequent nodes
-
-Notes: In real implementation, context is more probably cloned and modified.
-TODO: elaborate on context visibility. For example, `defineVariable()` should ot leak `select()` context.
-
-## Data flow as collections 
-
-Before we dive into specific nodes, understand that **input** (data) are  always a collection:
-
-Collections can be:
-- **Can be empty**: `{ }` represents no value/unknown
-- **Ordered**: `[1, 2, 3]` is different from `[3, 2, 1]`
-- **Non-unique**: `[1, 1, 2]` is valid
-- **Singleton**: `[1]` is a collection of one element
-- **Typed**: Each element has a type
-- **Mixed**: Each element may have different type (`children()` returns mixed collection)
-
-### The Empty Collection
-
-The empty collection `{ }` is special:
-- Represents missing or unknown values
-- Propagates through most operations, unless the function/operation indicates that an exception should be thrown with no input (not too many of these).
-- Acts as "unknown" in three-valued logic
-
 ## Meet Our Patient: Sarah Smith
 
-Throughout this guide, we'll use this Patient resource:
+To make the concepts concrete, we’ll use a single Patient resource as our running example throughout this guide:
 
 ```json
 {
@@ -168,36 +46,115 @@ Throughout this guide, we'll use this Patient resource:
 }
 ```
 
-We'll explore how different nodes process this data step by step.
+We’ll keep coming back to this patient — Sarah Smith — as we explore how different nodes handle real data step by step.
 
-## Input & Context are Starting Point
+
+## Input, Context, and Arguments
+
+Before diving into nodes, it helps to know the three things every node works with. 
 
 ### What is Input?
 
-Input is a collection of items, which are being processed.
+A key rule in FHIRPath is:
+all input is treated as a collection — even if it looks like a single value.
+
+It can be:
+
+- empty ({ }, meaning “no value” or “unknown”)
+- a singleton ([1])
+- ordered ([1, 2, 3] vs [3, 2, 1])
+- non-unique ([1, 1, 2])
+- mixed-type (children() can return different resource types)
+
+Example:
+
+['Sarah'] and ['Sarah', 'Jane'] are both collections, just with different lengths.
 
 ### What is Context?
 
-Context is the environment in which expressions evaluate. It contains:
+Context is the “workspace” in which evaluation happens. Unlike input, which changes as you move through the data, context often carries useful constants or shortcuts. 
+
+It contains:
 - **Variables**: Named values available during evaluation
-- **Special variables**: `$this`, `$index`, `$total`
-- **Standard FHIR variables**: `%context`, `%resource`
+- **Special variables**: like `$this`, `$index`, and `$total`
+- **Standard FHIR variables**: such as `%context`, `%resource`
 - **Environment**: External data like terminology servers
 
-External variables are used in FHIR SDC in questionnaire calculations
-or another good example is %previous in FHIR Subscription processing.
+Sometimes FHIRPath also provides extra variables for special use cases — think of these as bonus tools:
 
-The same expression can have different meanings depending on input and context.
+- Questionnaires (FHIR SDC): When filling out a long medical form, some answers may be automatically calculated from others. To make this possible, FHIR gives the calculation access to the entire form as an external variable, not just the current question.
+- Subscriptions: When the system needs to detect changes (for example, when a patient’s record is updated), it provides both the new version of the resource (the current input) and the previous version in a variable called %previous. This allows you to compare before-and-after and act only if something has changed.
 
-- **`$this`**: At the beginning set to input, can be modified by some function nodes (select, where, etc)
-- **`%context`**: The original input to the FHIRPath expression
-- **`%resource`**: The resource containing the current focus (may change during evaluation when crossing resource boundaries such as domainresource.contained, or bundle.entry.resource)
-- **`%rootResource`**: The root resource (for nested resources)
+Some of the variables are especially important to understand:
 
-TODO: more on %context
+- **`$this`**: Initially set to the input. It can be temporarily changed by some function nodes (select, where, etc)
+- **`%context`**: The anchor to the very first input of the FHIRPath expression — it always points back to where evaluation began, no matter how deep you navigate. It is especially important when your expression drills into deeply nested structures but you still need to refer back to the original input resource.
+- **`%resource`**: The resource containing the current focus. It may change during evaluation when crossing resource boundaries such as domainresource.contained, or bundle.entry.resource.
+- **`%rootResource`**: The root resource, useful when working inside nested resources.
 
-#### Starting with a Patient resource:
+#### Example: Evaluating name.given
 
+Let’s see context in action with our patient (we’ll use Sarah Smith throughout this guide):
+
+```
+Expression: name.given
+Input: [Patient(Sarah Smith)]
+Initial Context: {
+  %context: [Patient(Sarah Smith)],
+  %resource: [Patient(Sarah Smith)],
+  %rootResource: [Patient(Sarah Smith)],
+  $this: [Patient(Sarah Smith)]
+}
+Output: ['Sarah', 'Jane', 'SJ']
+```
+
+Here, name.given drills into the Patient’s names and collects all the given names. Notice how the context variables let you still reference the whole Patient, even though the input is now deeper inside the resource.
+
+
+### What is Argument?
+
+Arguments are the extra details you give to a function node so it knows exactly what to do. Each argument is itself another node to be evaluated. 
+
+Example 1:
+
+```
+substring(0, 2)
+```
+
+substring is the function. The numbers 0 and 2 are argument nodes. They are evaluated first, then the function applies its logic: “start at position 0, take 2 characters.”
+
+Example 2:
+
+```
+where(use = 'official')
+```
+
+Here the argument is a condition (use = 'official'). For each item in the input, the condition is evaluated. Only items where it returns true are kept.
+
+## Data Flow as Collections 
+
+Alongside context, we also need to understand how data flows. As we noted earlier, every node works with collections as input. Now let’s unpack what that really means.
+
+A collection can take many forms:
+
+- **It can be empty** `{ }`, representing no value/unknown
+- **It can be ordered**: `[1, 2, 3]` vs `[3, 2, 1]`
+- **It can contain duplicates**: `[1, 1, 2]` is valid
+- **It can be singleton**: `[1]` is a collection of one element
+- **It can be typed**: each element has a type
+- **It can be mixed**: each element may have different type (`children()` returns mixed collection)
+
+### The Empty Collection
+
+The empty collection deserves special mention. { } is used to:
+- Represent missing or unknown values
+- Propagates through most operations, unless the function/operation indicates that an exception should be thrown with no input (not too many of these).
+- Acts as "unknown" in three-valued logic. Sometimes it means the result is unknown, sometimes it forces an empty result, depending on the operator or function in use.
+
+
+#### Starting with a Patient resource
+
+Let’s see this in action with our patient:
 ```
 Expression: name.given
 Input: [Patient(Sarah Smith)]
@@ -209,22 +166,144 @@ Initial Context: {
 }
 Output: ['Sarah', 'Jane', 'SJ']
 ```
+Here’s what’s happening step by step:
+
+- Input: the entire Patient resource is the starting point.
+- Context: special variables are initialized to reference that Patient.
+- Expression: name.given drills down into the Patient’s names.
+- Output: the result is a list of given names — Sarah, Jane, SJ.
+
+This is your first complete cycle of input → context → expression → output.
+Keep this structure in mind, because the same pattern repeats no matter how complex the FHIRPath expression becomes.
+
+
+## The Core Mental Model: Everything is a Processing Node
+
+Once you know about input, context, and arguments, the next step is to see how they come together inside nodes. In FHIRPath, every part of an expression is a node — no matter if it’s a simple value, a function call, or an operator.
+The key insight that makes FHIRPath intuitive is this: 
+**every part of a FHIRPath expression is a processing node with the same interface**.
+
+```javascript
+node(context, input, args) -> { output, context }
+```
+Nodes don’t work in isolation: they are connected in a chain, passing along both the data being processed and the surrounding context.
+
+This simple idea of a chain of nodes carrying both data and context is the foundation for everything that follows.
+
+### The Universal Node Interface
+
+The important thing to keep in mind is that nodes always operate in the same pattern:
+they take input, apply their logic, and hand the result — together with the current context — over to the next node.
+
+```
+                 arguments (other nodes)
+                        │
+                        ▼
+                 ┌─────────────────┐
+input         ──►│                 │──► output
+(collection)     │   Processing    │    (collection)
+                 │      Node       │
+context       ──►│                 │──► context
+(variables)      └─────────────────┘    (possibly modified)
+```
+
+Every node:
+- **Receives** a collection as input
+- **Receives** a context containing variables and environment
+- **Has arguments** which are themselves nodes
+- **Orchestrates** how and when its argument nodes are evaluated
+- **Processes** the results according to its logic
+- **Produces** a collection as output
+- **Produces** a context (usually unchanged, but some nodes modify it)
+
+
+### How Nodes Connect
+
+A FHIRPath expression is a tree of connected nodes. This connection is what turns simple pieces into a meaningful expression. **Input** and **context** flow through these nodes:
+
+
+Expression: Patient.name.given
+
+Visually, this expression forms a tree:
+
+```
+                    ┌─────┐
+                    │  .  │ (dot node - root)
+                    └──┬──┘
+                       │
+                ┌──────┴──────────┐
+                │                 │
+            ┌───┴──┐          ┌───┴───┐
+            │  .   │          │ given │
+            └───┬──┘          └───────┘
+                │
+        ┌───────┴────────┐
+        │                │
+    ┌───┴────┐      ┌───┴──┐
+    │Patient │      │ name │
+    └────────┘      └──────┘
+```
+
+Here’s how the evaluation flows step by step:
+1. Patient (identifier) - extracts Patient resource from the input
+2. . (dot) - passes that Patient along to the next node
+3. name (identifier) - extracts name field(s) from the Patient
+4. . (dot) - passes those names to the next node
+5. given (identifier) - extracts the given names
+
+In this way, the nodes connect like links in a chain. Each one does a small job, and together they navigate through the resource to reach exactly the data you’re after.
+
+### Context Propagation Patterns
+
+Context doesn’t always behave the same way as it moves through an expression: sometimes it flows through unchanged, sometimes it’s temporarily modified, and sometimes it’s permanently altered.
+
+There are three main patterns:
+
+1. **Pass-through nodes** are the most common. They leave the context untouched, simply passing it from one node to the next.
+   - Simple navigation: `name`, `given`
+   - Simple functions: `first()`, `count()`
+   - Operators: `+`, `=`, `and`
+
+2. **Temporary context nodes** introduce extra variables while they do their work, but restore the original context afterwards.
+   - `where()`: adds `$this` for each item
+   - `select()`: adds `$this` for each item
+   - Context is restored after processing
+
+3. **Context-modifying nodes** change the context permanently.
+   - `defineVariable()`: adds a new variable
+   - Modified context flows to all subsequent nodes
+
+In practice, implementations often clone and modify context to keep things isolated. For example, a variable defined inside a select() shouldn’t “leak” outside of it.
+
+
+### Node Evaluation Control
+
+A critical idea is that **nodes decide how their arguments' are evaluated**. This is what makes one type of node different from another.
+
+1. **Simple nodes** (literals, identifiers) are the most straightforward. They don't have arguments at all, so there's nothing to control.
+2. **Operator nodes** always evaluate both of their arguments in parallel, using the same input and context.
+3. **Function nodes** can control:
+   - **Whether** an argument is evaluated at all — for example, `iif()` only evaluates one branch that matches the condition.
+   - **How many times** the argument is evaluated — `where()` evaluates once per item.
+   - **With what context** the argument runs — `where()` and `select()` adds `$this`.
+   - **In what order** arguments are evaluated — most functions go left to right.
+
+In other words, while all nodes share the same input–process–output pattern, the evaluation strategy they apply to their arguments can vary significantly. Understanding these differences is key to predicting how a FHIRPath expression will behave.
+
 
 ### The Ambiguity of `Patient`
 
-When you see `Patient` in FHIRPath, it's ambiguous - the same syntax can mean different things depending on input.
+When you see `Patient` in FHIRPath, remember that it can mean different things. The same command can have different results, depending on the data used.
 
 ```fhirpath
 Patient.name  // What does "Patient" mean here?
 ```
 
-This could be:
+At first glance this looks simple, but it could mean two very different things:
 1. **Field navigation** - looking for a field named "Patient"
 2. **Type filter** - filtering to only Patient resources
 
-The interpretation depends on:
-- Your input data structure
-- The data model being used
+Which interpretation applies depends on the input data and the data model.
 
 Examples of the ambiguity:
 ```fhirpath
@@ -236,14 +315,24 @@ Patient.name  → [{given: ["John"]}]  // Field navigation
 // Input: {resourceType: "Practitioner", id: "123", name: [...]}
 Patient.name  → { }  // Empty - neither field nor type match
 ```
+This kind of ambiguity is one reason FHIRPath can be challenging, and why understanding input and context is so important.
 
-## Basic Navigation Nodes
 
-Now let's explore how individual nodes work, starting with the simplest: navigation.
+## Node Types in FHIRPath
+
+Now that we’ve covered the core mental model, let’s explore the main categories of nodes in FHIRPath. Each type has its own evaluation behavior and role in building expressions.
+
+### Basic Navigation Nodes
+
+Now let’s look at the simplest kind of nodes in FHIRPath: navigation nodes.
+These are the parts of an expression that simply move you deeper into a resource by following its fields — almost like opening nested boxes inside a form.
 
 ### Identifier Nodes
 
-An identifier node extracts a named field from its input:
+An identifier node is the most direct kind of navigation. It just says: “Take the current data and show me the part with this name.”
+For example, name applied to our Patient doesn’t do anything clever — it just grabs whatever is in the name field.
+
+Processing our Patient:
 
 ```
 Type: Identifier
@@ -269,13 +358,14 @@ Key points:
 
 ### The Dot Operator: Sequential Processing and Context Threading
 
-The dot (`.`) is special - it connects nodes sequentially AND threads context:
+The dot (`.`) is special - it connects nodes sequentially AND threads context. Think of it as saying: “Now that I’ve got this, go deeper and look at that.”
 
 The dot operator does TWO critical jobs:
-1. **Data Pipeline**: Takes left's output as right's input
-2. **Context Pipeline**: Passes left's context to right
+1. **Passes along the data**: Takes left's output as right's input
+2. **Carries the context**: Passes left's context to right
 
-This dual role is why:
+This dual role is why variables work properly when you chain expressions with dots:
+
 ```fhirpath
 // Variables propagate through dots
 defineVariable('x', 5).name.select(%x + 1)  // Works!
@@ -284,13 +374,16 @@ defineVariable('x', 5).name.select(%x + 1)  // Works!
 defineVariable('x', 5) | name.select(%x + 1)  // %x is not available here
 ```
 
-The dot operator:
+Here’s what the dot is actually doing:
+
 1. Evaluates left side with original input/context
 2. Takes left's output as right's input
 3. **Passes left's output context to right** (crucial for variables!)
 4. Returns right's output and context
 
 ### Building Navigation Chains
+
+Now that we know the dot connects steps together, let’s see how chaining works in practice. A navigation chain is just a series of dots, each one moving a little deeper into the resource. Step by step, you drill down from the Patient to the exact detail you want.
 
 Let's trace `name.family` (starting from a Patient resource):
 
