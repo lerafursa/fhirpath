@@ -4,12 +4,12 @@
 
 FHIRPath is a path-based navigation and extraction language designed for FHIR resources. 
 At first glance, expressions like `Patient.name.where(use = 'official').given` might seem like simple property access. 
-But understanding how FHIRPath really works may be quite tricky without proper mental model.
+But understanding how FHIRPath really works may be quite tricky without a proper mental model.
 This is clear from ongoing community discussions, where even experienced users debate how certain expressions should behave:
 * [What should it do](https://chat.fhir.org/#narrow/channel/179266-fhirpath/topic/what.20should.20it.20do.3F/with/529563311) 
 * [Can we chain iif from left side](https://chat.fhir.org/#narrow/channel/179266-fhirpath/topic/Can.20we.20chain.20iif.20from.20left.20side.3F/with/529625685)
 
-To cut through this complexity, this guide will help you build an accurate mental model of how FHIRPath works by introducing "stream processing" model and walk 
+To cut through this complexity, this guide will help you build an accurate mental model of how FHIRPath works by introducing a "stream processing" model and walk 
 through the language by examples.
 
 
@@ -49,7 +49,7 @@ To make the concepts concrete, we’ll use a single Patient resource as our runn
 We’ll keep coming back to this patient — Sarah Smith — as we explore how different nodes handle real data step by step.
 
 
-## Input, Context, and Arguments
+## Input, Context, Arguments, and Data Flow
 
 Before diving into nodes, it helps to know the three things every node works with. 
 
@@ -60,7 +60,7 @@ all input is treated as a collection — even if it looks like a single value.
 
 It can be:
 
-- empty ({ }, meaning “no value” or “unknown”)
+- empty (`{ }`, meaning “no value” or “unknown”)
 - a singleton ([1])
 - ordered ([1, 2, 3] vs [3, 2, 1])
 - non-unique ([1, 1, 2])
@@ -69,6 +69,16 @@ It can be:
 Example:
 
 ['Sarah'] and ['Sarah', 'Jane'] are both collections, just with different lengths.
+
+#### Data Flow
+
+Every node receives a collection as input, applies its logic, and produces another collection as output. This chain of collections is how expressions move step by step.
+
+The empty collection `{ }` deserves special mention:
+
+- Represents missing or unknown values.
+- Propagates through most operations unless an operator or function specifies otherwise.
+- In Boolean logic, it behaves as “unknown,” which can lead to results that aren’t simply true or false.
 
 ### What is Context?
 
@@ -89,26 +99,8 @@ Some of the variables are especially important to understand:
 
 - **`$this`**: Initially set to the input. It can be temporarily changed by some function nodes (select, where, etc)
 - **`%context`**: The anchor to the very first input of the FHIRPath expression — it always points back to where evaluation began, no matter how deep you navigate. It is especially important when your expression drills into deeply nested structures but you still need to refer back to the original input resource.
-- **`%resource`**: The resource containing the current focus. It may change during evaluation when crossing resource boundaries such as domainresource.contained, or bundle.entry.resource.
+- **`%resource`**: The resource containing the current focus. It may change during evaluation when crossing resource boundaries such as `DomainResource.contained`, or bundle.entry.resource.
 - **`%rootResource`**: The root resource, useful when working inside nested resources.
-
-#### Example: Evaluating name.given
-
-Let’s see context in action with our patient (we’ll use Sarah Smith throughout this guide):
-
-```
-Expression: name.given
-Input: [Patient(Sarah Smith)]
-Initial Context: {
-  %context: [Patient(Sarah Smith)],
-  %resource: [Patient(Sarah Smith)],
-  %rootResource: [Patient(Sarah Smith)],
-  $this: [Patient(Sarah Smith)]
-}
-Output: ['Sarah', 'Jane', 'SJ']
-```
-
-Here, name.given drills into the Patient’s names and collects all the given names. Notice how the context variables let you still reference the whole Patient, even though the input is now deeper inside the resource.
 
 
 ### What is Argument?
@@ -130,27 +122,6 @@ where(use = 'official')
 ```
 
 Here the argument is a condition (use = 'official'). For each item in the input, the condition is evaluated. Only items where it returns true are kept.
-
-## Data Flow as Collections 
-
-Alongside context, we also need to understand how data flows. As we noted earlier, every node works with collections as input. Now let’s unpack what that really means.
-
-A collection can take many forms:
-
-- **It can be empty** `{ }`, representing no value/unknown
-- **It can be ordered**: `[1, 2, 3]` vs `[3, 2, 1]`
-- **It can contain duplicates**: `[1, 1, 2]` is valid
-- **It can be singleton**: `[1]` is a collection of one element
-- **It can be typed**: each element has a type
-- **It can be mixed**: each element may have different type (`children()` returns mixed collection)
-
-### The Empty Collection
-
-The empty collection deserves special mention. { } is used to:
-- Represent missing or unknown values
-- Propagates through most operations, unless the function/operation indicates that an exception should be thrown with no input (not too many of these).
-- Acts as "unknown" in three-valued logic. Sometimes it means the result is unknown, sometimes it forces an empty result, depending on the operator or function in use.
-
 
 #### Starting with a Patient resource
 
@@ -253,6 +224,22 @@ Here’s how the evaluation flows step by step:
 
 In this way, the nodes connect like links in a chain. Each one does a small job, and together they navigate through the resource to reach exactly the data you’re after.
 
+
+### Node Evaluation Control
+
+A critical idea is that **nodes decide how their arguments are evaluated**. This is what makes one type of node different from another.
+
+1. **Simple nodes** (literals, identifiers) are the most straightforward. They don't have arguments at all, so there's nothing to control.
+2. **Operator nodes** always evaluate both of their arguments in parallel, using the same input and context.
+3. **Function nodes** can control:
+   - **Whether** an argument is evaluated at all — for example, `iif()` only evaluates one branch that matches the condition.
+   - **How many times** the argument is evaluated — `where()` evaluates once per item.
+   - **With what context** the argument runs — `where()` and `select()` adds `$this`.
+   - **In what order** arguments are evaluated — most functions go left to right.
+
+In other words, while all nodes share the same input–process–output pattern, the evaluation strategy they apply to their arguments can vary significantly. Understanding these differences is key to predicting how a FHIRPath expression will behave.
+
+
 ### Context Propagation Patterns
 
 Context doesn’t always behave the same way as it moves through an expression: sometimes it flows through unchanged, sometimes it’s temporarily modified, and sometimes it’s permanently altered.
@@ -274,21 +261,6 @@ There are three main patterns:
    - Modified context flows to all subsequent nodes
 
 In practice, implementations often clone and modify context to keep things isolated. For example, a variable defined inside a select() shouldn’t “leak” outside of it.
-
-
-### Node Evaluation Control
-
-A critical idea is that **nodes decide how their arguments' are evaluated**. This is what makes one type of node different from another.
-
-1. **Simple nodes** (literals, identifiers) are the most straightforward. They don't have arguments at all, so there's nothing to control.
-2. **Operator nodes** always evaluate both of their arguments in parallel, using the same input and context.
-3. **Function nodes** can control:
-   - **Whether** an argument is evaluated at all — for example, `iif()` only evaluates one branch that matches the condition.
-   - **How many times** the argument is evaluated — `where()` evaluates once per item.
-   - **With what context** the argument runs — `where()` and `select()` adds `$this`.
-   - **In what order** arguments are evaluated — most functions go left to right.
-
-In other words, while all nodes share the same input–process–output pattern, the evaluation strategy they apply to their arguments can vary significantly. Understanding these differences is key to predicting how a FHIRPath expression will behave.
 
 
 ### The Ambiguity of `Patient`
@@ -339,7 +311,6 @@ Type: Identifier
 Node: name
 ```
 
-Processing our Patient:
 ```
 Input:    [Patient(Sarah Smith)]
 Context:  {initial context}
@@ -468,7 +439,7 @@ It just counts how many elements are in the collection.
 
 ### Functions With Arguments
 
-These funtions need extra details (arguments) to know what to do.
+These functions need extra details (arguments) to know what to do.
 
 #### `substring()` - Extract Text
 
@@ -666,9 +637,9 @@ How `name.where(use = 'official')` works:
 Input: [Name{use:'official'...}, Name{use:'nickname'...}]
 Context: {initial}
 
-The where node orchestrates its argument (use = 'official'):
-- Evaluates it MULTIPLE times (once per input item)
-- With DIFFERENT context each time (adds $this, $index)
+The `where` node orchestrates its argument (use = 'official'):
+- Evaluates it multiple times (once per input item)
+- With different context each time (adds $this, $index)
 - Controls the evaluation loop
 
 For each item:
@@ -687,10 +658,10 @@ Context: {initial}  // Original context restored!
 ```
 
 Key insights:
-- **where controls the loop** - the argument doesn't know it's in a loop
-- **where modifies context** before each evaluation
-- `$this` refers to the current item being processed
-- `$index` is the current position (0-based)
+- **`where` controls the loop** - the argument doesn't know it's in a loop
+- **`where` modifies context** before each evaluation
+- `$this` refers to the current item being checked
+- `$index` is the item’s position in the collection (starting at 0).
 - Original context is restored after processing
 - Only items where condition returns true are included
 
@@ -712,7 +683,7 @@ name.where(use = 'official' and given.exists())
 
 ### The `select()` Function
 
-`select()` transforms each item in a collection:
+`select()` transforms each item in a collection into something new:
 
 ```
 Node: select(expression)
@@ -742,7 +713,9 @@ Context: {initial}  // Restored
 
 ### More Iterator Functions
 
-#### `exists()` - Check if any match
+FHIRPath provides several other iterator-style helpers:
+
+#### `exists()` - Check if any item matches
 
 ```fhirpath
 name.exists(use = 'official')
@@ -750,7 +723,7 @@ name.exists(use = 'official')
 // Result: [true]
 ```
 
-#### `all()` - Check if all match
+#### `all()` - True if all items match
 
 ```fhirpath
 name.all(given.exists())
@@ -758,7 +731,7 @@ name.all(given.exists())
 // Result: [false]  // nickname has no given
 ```
 
-#### `distinct()` - Remove duplicates
+#### `distinct()` - Removes duplicates
 
 ```fhirpath
 name.use.distinct()
@@ -766,9 +739,22 @@ name.use.distinct()
 // Output: ['official', 'nickname']  // already unique
 ```
 
+### Why Iterators Matter
+
+Iterator functions give FHIRPath its expressive power. They let you:
+
+- Filter (where)
+- Transform (select)
+- Check conditions (exists, all)
+- Clean up (distinct)
+
+All while temporarily focusing on one item at a time, without losing track of the bigger context.
+
+
 ### Boolean Logic and Empty Collections
 
-FHIRPath uses three-valued logic where empty represents "unknown":
+FHIRPath uses three-valued logic where empty collection ({ }) represents "unknown".
+This can lead to results that are not simply true or false.
 
 ```fhirpath
 // With our Patient
@@ -789,29 +775,35 @@ not(true)      → [false]
 not(false)     → [true]
 not({ })       → { }     // unknown
 ```
+Key idea:
+- `{ }` acts as a placeholder for missing/unknown data.
+- Depending on the operator, it can either “propagate” (stay unknown) or resolve into a definite true/false.
 
 ## Control Flow Nodes
 
+Sometimes you don’t just want to navigate data — you want to make decisions as you go.
+Control flow nodes like `iif()` and `defineVariable()` let you add conditional logic or store values for later parts of the expression.
+
 ### The `iif()` Function: Conditional Logic
 
-`iif()` evaluates conditions and returns different values:
+`iif()` works like an “if-then-else.” It chooses between two results based on a condition.
 
 ```
 Node: iif(condition, trueResult, falseResult)
 Type: Conditional function
 ```
 
-Key behavior: **iif orchestrates conditional evaluation!**
+Key behavior: **iif orchestrates conditional evaluation.**
 
 Example:
 ```fhirpath
 iif(name.count() > 1, 'Multiple names', 'Single name')
 
-How iif orchestrates its three arguments:
-1. ALWAYS evaluates first argument (condition): name.count() > 1 → [true]
+How `iif` orchestrates its three arguments:
+1. Always evaluates first argument (condition): name.count() > 1 → [true]
 2. Decides which branch to evaluate based on result
-3. Since true, evaluates ONLY second argument: 'Multiple names'
-4. NEVER evaluates third argument!
+3. Since true, evaluates only second argument: 'Multiple names'
+4. Never evaluates third argument.
 5. Returns: ['Multiple names']
 ```
 
@@ -825,8 +817,12 @@ iif(true, defineVariable('x', 5), defineVariable('x', 10))  // Only first branch
 ```
 
 This lazy evaluation is crucial for:
+1. Avoiding errors (e.g., skip division by zero)
+2. Conditional variable definitions
+3. Branching logic in questionnaire calculations
+   
 ```fhirpath
-// Safe division - avoids division by zero
+// Safe division 
 iif(count() > 0, total / count(), 0)
 
 // Conditional context modification  
@@ -867,7 +863,7 @@ Patient.name
 
 ### The `defineVariable()` Function
 
-`defineVariable()` permanently adds a variable to the context:
+`defineVariable()` lets you store a value in the context and reuse it later in the same expression.
 
 ```
 Node: defineVariable(name, value)
@@ -886,7 +882,7 @@ Step by step:
 ```
 1. Start with Patient
    Context: {initial}
-   
+
 2. defineVariable('patientName', ...)
    Evaluate expression: name.where(use='official').given.first() → ['Sarah']
    Context becomes: {initial + %patientName: ['Sarah']}
@@ -951,8 +947,8 @@ Patient
 ```
 
 ### Combining Control Flow
+You can combine these tools for powerful logic:
 
-Complex example using both:
 ```fhirpath
 Patient
   .defineVariable('ageInYears', 
@@ -965,14 +961,18 @@ Patient
 
 // Result: ['Sarah is Adult']
 ```
+Here:
+- `defineVariable` saves age and age group
+- `iif` decides the age group category
+- select combines everything into a final string
 
 ## Putting It All Together
 
-Now let's see how all these concepts work in real scenarios.
+Now that we’ve explored navigation, functions, operators, and control flow, let’s see how these concepts combine in real-world FHIRPath expressions. The following examples use our Patient Sarah Smith and show how data, context, and logic flow together.
 
 ### Example 1: Finding Contact Information
 
-Task: "Find the home phone number for our patient's official name"
+Task: Find the home phone number for our patient's official name.
 
 ```fhirpath
 Patient
@@ -986,15 +986,15 @@ Patient
 ```
 
 Breaking it down:
-1. Start with Patient
+1. Start with `Patient`
 2. Store the official name for later use
-3. Navigate to telecom array
+3. Navigate to `telecom` array
 4. Filter for home phone
 5. Combine with stored name
 
 ### Example 2: Age-Based Logic
 
-Task: "Determine if patient needs pediatric or adult care"
+Task: Determine if patient needs pediatric or adult care.
 
 ```fhirpath
 Patient
@@ -1005,10 +1005,11 @@ Patient
 
 // Result: ['Adult patient: Sarah (Age: 39)']
 ```
+This shows how `defineVariable()` and `iif()` work together: first we calculate age, then use conditional logic to decide the label.
 
 ### Example 3: Complex Clinical Query
 
-Task: "Find all official names with their cities, but only for active patients"
+Task: Find all official names with their cities, but only for active patients.
 
 ```fhirpath
 Patient
@@ -1023,10 +1024,20 @@ Patient
 
 // Result: ['Sarah Jane Smith from Boston']
 ```
+Here:
 
-### Common Patterns
+- `where(active = true)` filters the Patient
+- `defineVariable('patient', $this)` stores the whole Patient for later reference
+- `select` pulls names and cities together in one output
+  
+### Common Expression Patterns
+
+As you start writing your own FHIRPath, you’ll notice recurring patterns:
 
 #### Pattern 1: Safe Navigation
+
+Handle missing data gracefully:
+
 ```fhirpath
 // Handle missing data gracefully
 name.where(use = 'official').given.first()
@@ -1034,12 +1045,18 @@ name.where(use = 'official').given.first()
 ```
 
 #### Pattern 2: Aggregation
+
+Count how many names have multiple given elements:
+
 ```fhirpath
 // Count specific items
 name.where(given.count() > 1).count()
 ```
 
 #### Pattern 3: Complex Filtering
+
+Filter addresses with multiple conditions:
+
 ```fhirpath
 // Multi-condition filtering
 address.where(
@@ -1050,6 +1067,9 @@ address.where(
 ```
 
 #### Pattern 4: Data Transformation
+
+Reshape data into custom structures:
+
 ```fhirpath
 // Build new structures
 select({
@@ -1060,16 +1080,18 @@ select({
 
 ## Summary: The Mental Model
 
-1. **Everything is a node** that processes collections AND orchestrates evaluation
-2. **Nodes control their arguments**:
-   - Simple functions: evaluate arguments once
-   - Iterators: evaluate arguments multiple times with modified context
-   - Conditionals: evaluate only needed arguments
-   - Operators: evaluate all arguments in parallel
-3. **Context flows** through the expression tree via dots
-4. **Dots create pipelines** for both data AND context
+At this point, we’ve seen how FHIRPath works from the ground up — input, context, arguments, nodes, and how they all interact. To keep it simple, here are the key takeaways:
+
+1. **Everything is a node** that processes collections and orchestrates evaluation
+2. **Nodes control their arguments differently**:
+   - Simple functions evaluate arguments once
+   - Iterators evaluate arguments multiple times with modified context
+   - Conditionals evaluate only needed arguments
+   - Operators evaluate all arguments in parallel
+3. **Context flows** through the expression tree, carried forward by the dot operator.
+4. **Dots create pipelines** for both input and context
 5. **Iterator functions** temporarily modify context with `$this`
-6. **Empty collections** represent unknown/missing values
+6. **Empty collections** represent unknown or missing values
 7. **Control flow nodes** enable complex logic through orchestration
 
 ### Evaluation Patterns Summary
@@ -1080,15 +1102,24 @@ select({
 | **Identifiers** | No arguments | Pass through |
 | **Operators** | All arguments in parallel | Pass through |
 | **Simple Functions** | Arguments once | Pass through |
-| **Iterators** | Arguments multiple times | Temporary $this/$index |
+| **Iterators** | Arguments multiple times | Temporary `$this` or `$index` |
 | **Conditionals** | Selected arguments only | From evaluated branch |
 | **Context Modifiers** | Arguments once | Permanently modified |
 
-With this mental model, you can:
+#### Wrapping Up
+
+Once you understand FHIRPath as a chain of nodes passing collections and context, the language becomes much easier to read and predict. You can:
+
 - Read any FHIRPath expression by tracing data flow
 - Understand HOW nodes control evaluation
 - Debug by following input→output transformations
 - Build complex queries by composing simple nodes
 - Predict which code executes and when
 
-Remember: FHIRPath nodes don't just transform data—they orchestrate the entire evaluation process. Master these concepts, and you've mastered FHIRPath!
+Remember: FHIRPath nodes don't just transform data — they orchestrate the entire evaluation process. Master these concepts, and you've mastered FHIRPath. 
+
+## Try It Yourself
+
+Now that you’ve built a mental model of how FHIRPath works, the best way to reinforce it is to experiment. Take an expression you use in your daily work, trace how input and context flow through it, and then run it directly against real data.
+
+If you want a ready-to-use playground, you can try these examples on an [Aidbox server](https://health-samurai.webflow.io/fhir-server) — it comes with full FHIRPath support built in, so you can test, debug, and refine your expressions step by step. Hands-on practice is the quickest way to turn this model into intuition.
