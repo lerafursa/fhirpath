@@ -403,6 +403,8 @@ Output: ['Smith']
 
 ### Navigation Examples with Our Patient
 
+Now that we know how navigation chains work, let’s see them in action with Sarah Smith’s Patient resource. Each expression starts from the Patient and drills down step by step.
+
 ```fhirpath
 // Starting from Patient resource
 name           → [HumanName{official}, HumanName{nickname}]
@@ -417,12 +419,20 @@ address.city         → ['Boston']
 address.state        → ['MA']
 address.postalCode   → ['02101']
 ```
+These examples show the power of chaining:
+- name.given walks from the Patient → name array → given names.
+- address.city walks from the Patient → address array → city field.
+
+The same pattern applies no matter how deep you go — dots simply pass along the results, letting you explore the resource like following a path through folders on your computer.
+
 
 ## Simple Function Nodes
 
-Functions are nodes that perform operations on their input. Let's start with the simplest ones.
-
+Functions are special nodes that do something with the data you’ve reached. Unlike navigation (which just follows fields deeper), functions can transform, count, or reshape the data.
+   
 ### Functions Without Arguments
+
+These functions don’t need any extra input. They just work on what you already have.
 
 #### `first()` - Get First Element
 
@@ -441,9 +451,10 @@ Output:   ['Sarah']
 Context:  {initial} (unchanged)
 ```
 
-Functions propagate empty input into empty output.
+This always takes the first element. If the list is empty, the result is empty too.
 
 #### `count()` - Count Elements
+
 
 ```
 name.count()
@@ -453,7 +464,11 @@ Output:   [2]
 Type:     Integer
 ```
 
+It just counts how many elements are in the collection.
+
 ### Functions With Arguments
+
+These funtions need extra details (arguments) to know what to do.
 
 #### `substring()` - Extract Text
 
@@ -478,11 +493,11 @@ substring(0, 2) orchestration:
 3. Apply substring using [0] and [2]
 ```
 
-How substring orchestrates its arguments:
-1. **Evaluates arguments once** with parent $this as input (TODO: think more about this!!!!)
-2. **Uses results** to perform substring operation
+How `substring` orchestrates its arguments:
+1. **Evaluates arguments once** with parent `$this` as input (TODO: think more about this!!!!)
+2. **Uses results** to perform `substring` operation
 
-Can use expressions as arguments:
+You can pass expressions as arguments:
 ```fhirpath
 name.family.substring(1, name.family.length() - 2)
 // Orchestration:
@@ -499,9 +514,8 @@ Patient.name.family.substring(1, length() - 2)
 //or even this expression in Patient context:
 '123456'.substring(1, length() - 2)
 ```
-
-Because `length()` will be evaluated with %context as input, which is Patient in our case
-and this expression is equivalent to `Patient.name.family.substring(1, Patient.length() - 2)`.
+Here, `length()` is evaluated with `%context` as input (the Patient resource), not the string.
+So this becomes equivalent to: `Patient.name.family.substring(1, Patient.length() - 2)`.
 or even `'123456'.substring(1, Patient.length() - 2)`.
 
 You probably need something like this:
@@ -516,10 +530,12 @@ Here, `select` will set `$this` to each family string.
 See [discussion](https://chat.fhir.org/#narrow/channel/179266-fhirpath/topic/what.20should.20it.20do.3F/with/529563311)
 
 ## Literal and Operator Nodes
+Now that we’ve seen navigation and simple functions, let’s look at two other building blocks: literals and operators.
+
 
 ### Literal Nodes
 
-Literals are constant values that ignore their input:
+Literals are constant values you place directly in an expression. It doesn’t care about the input — it always produces the same output
 
 ```
 Node: 'official'
@@ -537,7 +553,8 @@ Output:   ['official']
 Context:  {any context}   // unchanged
 ```
 
-Types of literals:
+FHIRPath supports several types of literals:
+
 ```fhirpath
 'official'     // String
 42             // Integer  
@@ -548,7 +565,7 @@ true           // Boolean
 
 ### Operator Nodes: Parallel Evaluation
 
-Unlike the dot operator, most operators evaluate their arguments in parallel with the same input/context.
+Operators combine or compare values. Unlike the dot `(.)` operator, which passes output step by step, most operators evaluate their arguments in parallel with the same input and context.
 
 #### Equality Operator
 
@@ -557,7 +574,7 @@ Node: =
 Type: Binary operator
 ```
 
-How `given.first() = family` works:
+Let’s check if a given name equals the family name:
 
 ```
                     Input: [Name{given:['Sarah','Jane'], family:'Smith'}]
@@ -584,6 +601,7 @@ Key insight: Both sides get the SAME input (the Name object) and context!
 ### Operator Examples
 
 With our Patient's official name:
+
 ```fhirpath
 // Input: [Name{use:'official', family:'Smith', given:['Sarah','Jane']}]
 
@@ -630,7 +648,8 @@ name.use = 'official' and name.given.count() > 1
 
 ## Iterator Function Nodes: Working with Collections
 
-Iterator functions are special - they process each item in a collection individually while temporarily modifying context.
+Iterator functions are special: instead of working on the collection as a whole, they loop through each item one by one, adding temporary variables like `$this` and `$index` while they process. After the loop, the original context is restored.
+This is what makes expressions like `where()` and `select()` so powerful.
 
 ### The `where()` Function
 
