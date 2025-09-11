@@ -230,7 +230,7 @@ In this way, the nodes connect like links in a chain. Each one does a small job,
 A critical idea is that **nodes decide how their arguments are evaluated**. This is what makes one type of node different from another.
 
 1. **Simple nodes** (literals, identifiers) are the most straightforward. They don't have arguments at all, so there's nothing to control.
-2. **Operator nodes** always evaluate both of their arguments in parallel, using the same input and context.
+2. Most **operator nodes** (such as =, +, and) evaluate both of their arguments in parallel, using the same input and context. The dot (.) operator is the key exception: it works sequentially, passing the left side’s output as the right side’s input.
 3. **Function nodes** can control:
    - **Whether** an argument is evaluated at all — for example, `iif()` only evaluates one branch that matches the condition.
    - **How many times** the argument is evaluated — `where()` evaluates once per item.
